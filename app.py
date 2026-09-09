@@ -147,8 +147,6 @@ import pandas as pd
 import altair as alt
 from PIL import Image
 import streamlit as st
-import tensorflow as tf
-from tensorflow import keras
 import openvino as ov
 
 
@@ -177,9 +175,12 @@ def show_image_full_width(pil_img, caption=None):
                 st.image(pil_img, caption=caption)
 
 # ── 설정 ─────────────────────────────────────────────────────────
-MODEL_PATH     = "./weights/leather_model.keras"   # .keras 모델 경로
+MODEL_PATH     = "./weights/leather_model.xml"   # OpenVINO IR 경로
 INPUT_IMG_SIZE = (224, 224)
 CLASSES        = ["정상", "불량"]
+
+# VGG16 preprocess_input(mode="caffe")과 동일한 채널별 평균값 (BGR 순서)
+VGG16_MEAN_BGR = np.array([103.939, 116.779, 123.68], dtype=np.float32)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -192,21 +193,19 @@ CLASSES        = ["정상", "불량"]
 @st.cache_resource(show_spinner="모델을 불러오는 중입니다...")
 def load_model():
     if not os.path.exists(MODEL_PATH):
-        raise FileNotFoundError(f"모델 파일이 없습니다: {MODEL_PATH}")
-    model = tf.keras.models.load_model(MODEL_PATH)
-    ov_model = ov.convert_model(model)
-    compiled_model = ov.compile_model(ov_model)  # ★ 추론 전 반드시 컴파일 필요
+        raise FileNotFoundError(f"IR 모델 파일이 없습니다: {MODEL_PATH}")
+    compiled_model = ov.compile_model(MODEL_PATH)
     return compiled_model
 
 
 # ─────────────────────────────────────────────────────────────────
-# 2. 이미지 전처리 (기존 로직 그대로)
-#    VGG16 학습 때 쓴 preprocess_input 과 동일하게 맞춰야 예측이 정확하다.
+# 2. 이미지 전처리
+#    VGG16 학습 때 쓴 preprocess_input(mode="caffe")과 동일하게 맞춘다.
 # ─────────────────────────────────────────────────────────────────
 def preprocess(pil_img):
     img = pil_img.convert("RGB").resize(INPUT_IMG_SIZE)
     arr = np.array(img, dtype=np.float32)
-    arr = keras.applications.vgg16.preprocess_input(arr)
+    arr = arr[..., ::-1] - VGG16_MEAN_BGR  # RGB → BGR + 평균값 제거
     return np.expand_dims(arr, axis=0)
 
 

@@ -1,0 +1,4 @@
+# requirements-dev.txt
+# convert_to_ir.py 실행(로컬에서 .keras → OpenVINO IR 변환) 전용
+# 배포 환경(requirements.txt)에는 포함하지 않는다.
+tensorflow==2.17.0

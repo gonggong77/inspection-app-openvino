@@ -1,14 +1,15 @@
 """
-infer_keras.py  ─  [수업 1단계] Streamlit UI 없이 .keras 모델로 추론하기
+infer_keras.py  ─  OpenVINO IR로 추론하기
 ════════════════════════════════════════════════════════════════════
-이 코드는 웹 UI 없이 "모델 로드 → 추론 → 결과 확인" 흐름만 담은 기본 코드다.
-먼저 이 코드로 핵심 로직을 이해한 뒤, 다음 단계에서 Streamlit UI를 입힌다.
+"모델 로드 → 추론 → 결과 확인" 흐름만 담은 기본 코드다.
+tensorflow 없이 OpenVINO IR(.xml/.bin)만으로 동작한다.
+IR 파일이 없다면 먼저 convert_to_ir.py 를 실행해서 만들어야 한다.
 
 [전체 흐름]
-  1. 모델 로드    : tf.keras.models.load_model()  ← 구조+가중치 한 번에
+  1. 모델 로드    : ov.compile_model()  ← IR(.xml/.bin) 로드 + 컴파일
   2. 이미지 준비  : 테스트 이미지 파일  또는  웹캠 촬영
-  3. 전처리       : PIL → numpy → VGG16 정규화
-  4. 추론         : model.predict()  → sigmoid 단일 확률값
+  3. 전처리       : PIL → numpy → VGG16 정규화 (직접 구현)
+  4. 추론         : compiled_model()  → sigmoid 단일 확률값
   5. 결과 확인    : 정상 / 불량 + 확률  (콘솔 출력 + 이미지 표시)
 
 [입력 방식 전환]
@@ -17,7 +18,7 @@ infer_keras.py  ─  [수업 1단계] Streamlit UI 없이 .keras 모델로 추�
     "webcam" → 웹캠을 켜고 SPACE 키로 촬영한 이미지로 추론
 
 [필요 패키지]
-  pip install tensorflow pillow numpy matplotlib opencv-python
+  pip install openvino pillow numpy matplotlib opencv-python
   ※ 웹캠 모드는 opencv-python 필요 (headless 버전은 창 표시 불가)
 """
 
@@ -26,16 +27,17 @@ import numpy as np
 from PIL import Image
 import matplotlib
 import matplotlib.pyplot as plt
-import tensorflow as tf
-from tensorflow import keras
 import openvino as ov
 
 # ── 설정 ─────────────────────────────────────────────────────────
 INPUT_MODE      = "image"                          # "image" 또는 "webcam"
-MODEL_PATH      = "./weights/leather_model.keras"   # .keras 모델 경로
+MODEL_PATH      = "./weights/leather_model.xml"     # OpenVINO IR 경로
 TEST_IMAGE_PATH = "sample.png"        # 테스트 이미지 경로
 INPUT_IMG_SIZE  = (224, 224)
 CLASSES         = ["정상", "불량"]
+
+# VGG16 preprocess_input(mode="caffe")과 동일한 채널별 평균값 (BGR 순서)
+VGG16_MEAN_BGR = np.array([103.939, 116.779, 123.68], dtype=np.float32)
 
 # 한글 폰트 (matplotlib 그래프 제목 깨짐 방지)
 for _fp, _fam in [("C:/Windows/Fonts/malgun.ttf", "Malgun Gothic"),
@@ -48,33 +50,28 @@ matplotlib.rcParams["axes.unicode_minus"] = False
 
 # ─────────────────────────────────────────────────────────────────
 # 1. 모델 로드
-#    .keras 파일에는 모델 구조 + 가중치가 함께 저장되어 있으므로
-#    load_model() 한 줄로 복원된다. (구조를 다시 정의할 필요 없음)
+#    IR(.xml/.bin)을 compile_model()로 바로 불러와 컴파일한다.
 # ─────────────────────────────────────────────────────────────────
 def load_model():
     if not os.path.exists(MODEL_PATH):
-        raise FileNotFoundError(f"모델 파일이 없습니다: {MODEL_PATH}")
-    model = tf.keras.models.load_model(MODEL_PATH)
-    ov_model = ov.convert_model(model)
+        raise FileNotFoundError(f"IR 모델 파일이 없습니다: {MODEL_PATH}\n"
+                                 f"먼저 convert_to_ir.py 를 실행해서 IR을 생성하세요.")
+    compiled_model = ov.compile_model(MODEL_PATH)
     print(f"[1] 모델 로드 완료 → {MODEL_PATH}")
-    return ov_model
+    return compiled_model
 
-def save_model(model):
-    if not os.path.exists(MODEL_PATH):
-            raise FileNotFoundError(f"모델 파일이 없습니다: {MODEL_PATH}")
-    ov.save_model(model, "weights/leather_model.xml")
 
 # ─────────────────────────────────────────────────────────────────
 # 2. 이미지 전처리
-#    VGG16 학습 때 쓴 preprocess_input 과 동일하게 맞춰야 예측이 정확하다.
+#    VGG16 학습 때 쓴 preprocess_input(mode="caffe")과 동일하게 맞춘다.
 #    ① RGB 변환 + 224×224 리사이즈
-#    ② VGG16 전용 정규화 (preprocess_input)
+#    ② RGB → BGR 순서 변경 + 채널별 평균값 빼기
 #    ③ 배치 차원 추가 (224,224,3) → (1,224,224,3)
 # ─────────────────────────────────────────────────────────────────
 def preprocess(pil_img):
     img = pil_img.convert("RGB").resize(INPUT_IMG_SIZE)
     arr = np.array(img, dtype=np.float32)
-    arr = keras.applications.vgg16.preprocess_input(arr)
+    arr = arr[..., ::-1] - VGG16_MEAN_BGR  # RGB → BGR + 평균값 제거
     return np.expand_dims(arr, axis=0)
 
 
@@ -83,10 +80,10 @@ def preprocess(pil_img):
 #    출력은 sigmoid 단일값 → 0에 가까우면 정상, 1에 가까우면 불량
 # ─────────────────────────────────────────────────────────────────
 def predict(compiled_model, pil_img):
-    arr   = preprocess(pil_img)
-    result = compiled_model(arr)[compiled_model.output(0)]  # ★ OpenVINO 추론 방식
-    prob  = float(result[0][0])
-    label = CLASSES[1 if prob > 0.5 else 0]
+    arr    = preprocess(pil_img)
+    result = compiled_model(arr)[compiled_model.output(0)]
+    prob   = float(result[0][0])
+    label  = CLASSES[1 if prob > 0.5 else 0]
     return label, prob
 
 
@@ -165,8 +162,6 @@ def get_image_from_webcam():
 # ─────────────────────────────────────────────────────────────────
 def main():
     model = load_model()
-    save_model(model)
-    compiled_model = ov.compile_model(model)  # ★ 추론 전 반드시 컴파일 필요
 
     if INPUT_MODE == "image":
         pil_img = get_image_from_file()
@@ -176,7 +171,7 @@ def main():
         raise ValueError("INPUT_MODE 는 'image' 또는 'webcam' 이어야 합니다.")
 
     print("[3] 추론 중...")
-    label, prob = predict(compiled_model, pil_img)
+    label, prob = predict(model, pil_img)
 
     print("[4] 결과 확인")
     show_result(pil_img, label, prob)
